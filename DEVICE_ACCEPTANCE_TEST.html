@@ -1,0 +1,60 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>USCW 16.1-rc24 Device Acceptance Test</title><style>body{font:16px system-ui;background:#101525;color:#f8f4e8;max-width:720px;margin:auto;padding:20px}h1{color:#ffd15b}section{background:#1c2639;border:1px solid #4d5362;border-radius:12px;padding:16px;margin:14px 0}button,a{background:#ffd15b;color:#151515;padding:10px;border:0;border-radius:7px;font-weight:bold;display:inline-block;margin:5px}label{display:block;margin:12px 0}small{color:#bac8d9}pre{white-space:pre-wrap;overflow-wrap:anywhere}input{width:22px;height:22px;vertical-align:middle}</style></head><body><h1>USCW Device Acceptance · Alpha 16.1-rc24</h1><p>Run on the actual iPhone Safari browser before approving the private beta. The checklist resets for each new build, so older test results cannot certify a changed release. This page never reads or changes USCW league saves. Use the same website origin as the game for a meaningful storage test.</p><section><h2>1. Native storage diagnostic</h2><button id="run">Run real browser storage test</button><pre id="result">Not tested</pre><small>Tests isolated temporary IndexedDB and localStorage keys, deletes test data afterward, and does not touch league data. Safari private browsing or storage restrictions may fail.</small></section><section><h2>2. Device acceptance checklist</h2><div id="checks"></div><button id="export">Export QA report</button><button id="reset">Reset checklist</button><p id="summary"></p><p id="releaseStatus" role="status" aria-live="polite"></p></section><p><a href="index.html">Return to USCW</a></p><script>
+const tasks=['Open USCW in Safari without a blank screen','Register a wrestler and confirm saved profile','Run an exhibition match and view its result','Run an official match and confirm ranking updates','Advance a league week and inspect Battle Royal entry','Save League DB snapshot, then reload the game','Confirm saved wrestler and league state survive reload','Create a backup and select a recovery point','Cancel recovery and confirm no league data changes','Restore a known backup and verify the recovered state','Check buttons, overlays, and navigation on iPhone screen','Test landscape and portrait orientation'];
+const DIAGNOSTIC_REVISION=2;const BUILD='16.1-rc24';const deviceEligible=()=>/iPhone/i.test(navigator.userAgent)&&/Safari/i.test(navigator.userAgent)&&!/CriOS|FxiOS|EdgiOS|OPiOS/i.test(navigator.userAgent)&&location.protocol==='https:';const key='uscw-device-qa-'+BUILD.replace('.','-');let state={};try{state=JSON.parse(localStorage.getItem(key)||'{}')}catch{};
+function render(){document.getElementById('checks').innerHTML='';tasks.forEach((t,i)=>{let l=document.createElement('label'),c=document.createElement('input');c.type='checkbox';c.checked=!!state[i];c.onchange=()=>{state[i]=c.checked;try{localStorage.setItem(key,JSON.stringify(state))}catch{}render()};l.append(c,document.createTextNode(' '+t));document.getElementById('checks').append(l)});document.getElementById('summary').textContent=tasks.filter((_,i)=>state[i]).length+' / '+tasks.length+' manual checks completed';document.getElementById('releaseStatus').textContent=deviceEligible()&&diagnostic.status==='PASS'&&tasks.every((_,i)=>state[i])?'Device acceptance: ALL CHECKS COMPLETE (pending owner deployment approval)':'Device acceptance: NOT READY — requires iPhone Safari over HTTPS, storage diagnostic and all 12 manual checks';}
+const diagnosticKey='uscw-device-diagnostic-'+BUILD.replace('.','-');
+let diagnostic={status:'NOT TESTED'};
+try{const saved=JSON.parse(sessionStorage.getItem(diagnosticKey)||'null');if(saved&&saved.revision===DIAGNOSTIC_REVISION&&saved.build===BUILD&&saved.origin===location.origin&&saved.userAgent===navigator.userAgent&&Date.now()-saved.savedAt<86400000&&saved.diagnostic?.status==='PASS'&&saved.diagnostic?.cleanup==='completed')diagnostic=saved.diagnostic}catch{}
+function saveDiagnostic(){try{sessionStorage.setItem(diagnosticKey,JSON.stringify({revision:DIAGNOSTIC_REVISION,build:BUILD,origin:location.origin,userAgent:navigator.userAgent,savedAt:Date.now(),diagnostic}))}catch{}}
+
+function request(req){return new Promise((ok,fail)=>{req.onsuccess=()=>ok(req.result);req.onerror=()=>fail(req.error||Error('Storage request failed'))})}
+// A blocked deletion is pending, not failed: Safari may still be closing a connection.
+function deleteTemporaryDatabase(name){return new Promise((ok,fail)=>{
+ const deletion=indexedDB.deleteDatabase(name);
+ const timer=setTimeout(()=>fail(Error('Temporary database deletion timed out; close other test tabs and retry')),10000);
+ deletion.onsuccess=()=>{clearTimeout(timer);ok()};
+ deletion.onerror=()=>{clearTimeout(timer);fail(deletion.error||Error('Deletion failed'))};
+ deletion.onblocked=()=>{document.getElementById('result').textContent='Waiting for the temporary database to close...'};
+})}
+async function run(){
+ const result=document.getElementById('result'),button=document.getElementById('run');
+ const name='USCW-QA-TEMP-160-'+Date.now()+'-'+Math.random().toString(36).slice(2);
+ const k='uscw-qa-temp-160-'+Math.random().toString(36).slice(2);
+ let db=null,cleanup='not attempted';button.disabled=true;result.textContent='Running write, close, reopen and verification...';
+ diagnostic={status:'FAIL',time:new Date().toISOString(),reopenVerified:false};
+ try{
+  if(!deviceEligible())throw Error('Release certification requires actual iPhone Safari over HTTPS (not desktop or a local file)');
+  if(!window.indexedDB)throw Error('Native IndexedDB unavailable');
+  const first=indexedDB.open(name,1);
+  first.onupgradeneeded=()=>first.result.createObjectStore('qa');
+  db=await request(first);
+  const value='qa-'+Date.now()+'-'+Math.random();
+  await new Promise((ok,fail)=>{const tx=db.transaction('qa','readwrite');tx.objectStore('qa').put(value,'proof');tx.oncomplete=ok;tx.onerror=()=>fail(tx.error||Error('Write failed'));tx.onabort=()=>fail(tx.error||Error('Write aborted'))});
+  db.close();db=null;
+  db=await request(indexedDB.open(name,1));
+  // Wait for transaction completion, not only request success, before closing.
+  const got=await new Promise((ok,fail)=>{
+   const tx=db.transaction('qa','readonly');let value;
+   const read=tx.objectStore('qa').get('proof');
+   read.onsuccess=()=>{value=read.result};
+   tx.oncomplete=()=>ok(value);
+   tx.onerror=()=>fail(tx.error||Error('Read failed'));
+   tx.onabort=()=>fail(tx.error||Error('Read aborted'));
+  });
+  if(got!==value)throw Error('IndexedDB data did not survive close/reopen');
+  localStorage.setItem(k,value);
+  if(localStorage.getItem(k)!==value)throw Error('localStorage read-back mismatch');
+  diagnostic={status:'PASS',time:new Date().toISOString(),reopenVerified:true,indexedDB:'committed, closed, reopened and verified',localStorage:'write/read passed'};
+ }catch(e){diagnostic.error=String(e?.message||e)}
+ finally{
+  if(db)db.close();
+  try{localStorage.removeItem(k)}catch(e){diagnostic.cleanupWarning='localStorage cleanup failed'}
+  try{await deleteTemporaryDatabase(name);cleanup='completed'}catch(e){cleanup='failed: '+String(e?.message||e)}
+  diagnostic.cleanup=cleanup;
+  if(cleanup!=='completed'&&diagnostic.status==='PASS'){diagnostic.status='FAIL';diagnostic.error='Temporary database cleanup failed'}
+  saveDiagnostic();result.textContent=JSON.stringify(diagnostic,null,2);button.disabled=false;render();
+ }
+}
+document.getElementById('run').onclick=run;document.getElementById('reset').onclick=()=>{if(confirm('Clear device QA checkboxes?')){state={};diagnostic={status:'NOT TESTED'};localStorage.removeItem(key);sessionStorage.removeItem(diagnosticKey);document.getElementById('result').textContent='Not tested';render()}};document.getElementById('export').onclick=()=>{let report={diagnosticRevision:DIAGNOSTIC_REVISION,build:BUILD,time:new Date().toISOString(),userAgent:navigator.userAgent,origin:location.origin,deviceEligible:deviceEligible(),diagnostic,deviceAcceptancePassed:deviceEligible()&&diagnostic.status==='PASS'&&tasks.every((_,i)=>state[i]),checks:tasks.map((task,i)=>({task,passed:!!state[i]}))};let url=URL.createObjectURL(new Blob([JSON.stringify(report,null,2)],{type:'application/json'}));let a=document.createElement('a');a.href=url;a.download='USCW-device-QA-'+BUILD+'.json';a.click();setTimeout(()=>URL.revokeObjectURL(url),1000)};render();
+if(diagnostic.status==='PASS')document.getElementById('result').textContent=JSON.stringify(diagnostic,null,2);
+</script></body></html>
